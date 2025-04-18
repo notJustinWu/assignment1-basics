@@ -108,15 +108,18 @@ def train_bpe(
         return vocab, []
         
     token_counts = parallel_pretokenize(input_path, special_tokens, mp.cpu_count())
-    #token_counts = pretokenize(input_path, special_tokens)
+
     
     # track merges
     merges = []
-    pair_counts = defaultdict(int)
-    for word, count in tqdm(token_counts.items()):
+    pair_counts = Counter()
+    pair_locations = defaultdict(set)
+
+    for word, count in token_counts.items():
         for i in range(len(word) - 1):
             pair = word[i:i+2]
             pair_counts[pair] += count
+            pair_locations[pair].add(word)
 
     for _ in tqdm(range(num_merges)):
         # find the most frequent pair
@@ -138,59 +141,55 @@ def train_bpe(
         vocab[new_token_id] = new_word
 
         # merge this pair in all places that it shows up
-        new_token_counts = defaultdict(int)
-        for word, count in token_counts.items():
-            i = 0
-            new_word = word 
-            while i < len(new_word) - 1:
-                pair = new_word[i:i+2]
-                if pair == most_frequent_pair:
-                    prefix = new_word[:i]
-                    suffix = new_word[i+2:]
-                    merged = pair[0] + pair[1]
-                    merged_tuple = (merged,)
+        #new_token_counts = defaultdict(int)
+        affected_tokens = pair_locations.pop(most_frequent_pair)
+        for old_tok in list(affected_tokens):
+            if old_tok not in token_counts:
+                continue
+            cnt = token_counts[old_tok]
 
-                    # remove from pair_counts
-                    pair_counts[most_frequent_pair] -= count
-
-                    if i > 0:  
-                        old_pair = (prefix[-1], pair[0])
-                        new_pair = (prefix[-1], merged)
-                        pair_counts[old_pair] -= count
-                        pair_counts[new_pair] += count
-
-                    if i + 2 < len(new_word):
-                        old_pair = (pair[1], new_word[i+2])
-                        new_pair = (merged, new_word[i+2])
-                        pair_counts[old_pair] -= count
-                        pair_counts[new_pair] += count
-
-                    new_word = prefix + merged_tuple + suffix
-
-                    i += 1  
-                else:
-                    i += 1
+            for i in range(len(old_tok) - 1):
+                pair = (old_tok[i], old_tok[i+1])
+                pair_counts[pair] -= cnt
+                pair_locations[pair].discard(old_tok)
+                if pair_counts[pair] <= 0:
+                    pair_counts.pop(pair, None)
+                    pair_locations.pop(pair, None)
             
-            new_token_counts[new_word] += count
-        if pair_counts[most_frequent_pair] <= 0:
-            del pair_counts[most_frequent_pair]
-        token_counts = new_token_counts
+            new_tok_list = []
+            i = 0
+            while i < len(old_tok):
+                if i < len(old_tok) - 1 and (old_tok[i], old_tok[i+1]) == most_frequent_pair:
+                    new_tok_list.append(old_tok[i] + old_tok[i+1])
+                    i += 2
+                else:
+                    new_tok_list.append(old_tok[i])
+                    i += 1
+            new_tok = tuple(new_tok_list)
+            for j in range(len(new_tok) - 1):
+                pair = (new_tok[j], new_tok[j+1])
+                pair_counts[pair] += cnt
+                pair_locations[pair].add(new_tok)
+            
+            token_counts.pop(old_tok)
+            token_counts[new_tok] = cnt
 
     return vocab, merges
 
 def train_tokenizer():
     vocab, merges = train_bpe(
-        input_path="data/TinyStoriesV2-GPT4-valid.txt",
-        vocab_size=10000,
+        input_path="data/owt_train.txt",
+        vocab_size=32000,
         special_tokens=["<|endoftext|>"],
     )
     # serialize the vocab and merges
-    with open("cs336_basics/vocab/vocab_tiny_stories_gpt4_valid.pkl", "wb") as f:
+    with open("cs336_basics/vocab/owt_train_vocab.pkl", "wb") as f:
         pickle.dump(vocab, f)
-    with open("cs336_basics/vocab/merges_tiny_stories_gpt4_valid.pkl", "wb") as f:
+    with open("cs336_basics/vocab/owt_train_merges.pkl", "wb") as f:
         pickle.dump(merges, f)
 
 if __name__ == "__main__":
+    mp.freeze_support()
     #track time
     start_time = time.time()
     print("Training tokenizer...")

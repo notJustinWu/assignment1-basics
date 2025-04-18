@@ -199,11 +199,11 @@ class multihead_self_attention(torch.nn.Module):
         V = rearrange(V, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
 
         if positions is not None:
-            ROPE = RotaryPositionalEmbedding(theta=theta, d_k=self.dk, max_seq_len=max_seq_len)
+            ROPE = RotaryPositionalEmbedding(theta=theta, d_k=self.dk, max_seq_len=max_seq_len, device=x.device)
             Q = ROPE(Q, positions)
             K = ROPE(K, positions)
 
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=Q.device), diagonal=1).bool()
 
         multi_attn = scaled_dot_product_attention(Q, K, V, mask=~causal_mask)
         concat_attn = rearrange(multi_attn, "... head seq_len d_v -> ... seq_len (head d_v)")
@@ -282,4 +282,138 @@ def cross_entropy(logits, targets):
     # neg_log_prob = torch.log(denom)-logits_stable[torch.arange(logits_stable.size(0)), targets]
     return torch.mean(neg_log_prob)
 
+########################################################
+# ABLATIONS ############################################
+########################################################
 
+# ABLATION 1: Remove RMSNorm ##########################
+
+class transformer_block_ablation_no_rms_norm(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.attn = multihead_self_attention(d_model=self.d_model, num_heads=num_heads)
+        self.ffn = positionwise_feedforward(d_model=self.d_model, d_ff=self.d_ff)
+    def forward(self, x: torch.Tensor, positions=None, theta=None, max_seq_len=None):
+        y = x + self.attn(x, positions=positions, theta=theta, max_seq_len=max_seq_len)
+        z = y + self.ffn(y)
+
+        return z
+
+class transformer_lm_ablation_no_rms_norm(torch.nn.Module):
+    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.token_embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.transformer_blocks = torch.nn.ModuleList([
+            transformer_block_ablation_no_rms_norm(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
+        self.linear = Linear(in_features=d_model, out_features=vocab_size)
+
+    def forward(self, in_indices, positions=None, theta=None):
+        x = self.token_embedding(in_indices)
+        
+        for block in self.transformer_blocks:
+            x = block(x, positions=positions, theta=theta, max_seq_len=self.context_length)
+            
+        result = self.linear(x)
+
+        return result
+
+# ABLATION 2: Post RMSNorm ##########################
+
+class transformer_block_ablation_post_rms_norm (torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.norm1 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.norm2 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.attn = multihead_self_attention(d_model=self.d_model, num_heads=num_heads)
+        self.ffn = positionwise_feedforward(d_model=self.d_model, d_ff=self.d_ff)
+    def forward(self, x: torch.Tensor, positions=None, theta=None, max_seq_len=None):
+        y = self.norm1(x + self.attn(x, positions=positions, theta=theta, max_seq_len=max_seq_len))
+        z = self.norm2(y + self.ffn(y))
+
+        return z
+
+class transformer_lm_ablation_post_rms_norm(torch.nn.Module):
+    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.token_embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.transformer_blocks = torch.nn.ModuleList([
+            transformer_block(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
+        self.norm = RMSNorm(d_model=d_model, eps=1e-5)
+        self.linear = Linear(in_features=d_model, out_features=vocab_size)
+
+    def forward(self, in_indices, positions=None, theta=None):
+        x = self.token_embedding(in_indices)
+        
+        for block in self.transformer_blocks:
+            x = block(x, positions=positions, theta=theta, max_seq_len=self.context_length)
+            
+        result = self.linear(self.norm(x))
+
+        return result
+
+# ABLATION 3: No Position Embedding ##########################
+
+# JUST DO THE SAME THING BUT PASS IN NONE FOR POSITIONS AND THETA
+
+# ABLATION 4: Silu Activation Function
+class positionwise_feedforward_ablation_silu(torch.nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.linear1 = Linear(d_model, d_ff)
+        self.linear2 = Linear(d_ff, d_model)
+    
+    def silu(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear2(self.silu(self.linear1(x)))
+
+class transformer_block_ablation_silu(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.norm1 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.norm2 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.attn = multihead_self_attention(d_model=self.d_model, num_heads=num_heads)
+        self.ffn = positionwise_feedforward_ablation_silu(d_model=self.d_model, d_ff=self.d_ff)
+    def forward(self, x: torch.Tensor, positions=None, theta=None, max_seq_len=None):
+        y = x + self.attn(self.norm1(x), positions=positions, theta=theta, max_seq_len=max_seq_len)
+        z = y + self.ffn(self.norm2(y))
+
+        return z
+
+class transformer_lm_ablation_silu(torch.nn.Module):
+    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.token_embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.transformer_blocks = torch.nn.ModuleList([
+            transformer_block_ablation_silu(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
+        self.norm = RMSNorm(d_model=d_model, eps=1e-5)
+        self.linear = Linear(in_features=d_model, out_features=vocab_size)
+
+    def forward(self, in_indices, positions=None, theta=None):
+        x = self.token_embedding(in_indices)
+        
+        for block in self.transformer_blocks:
+            x = block(x, positions=positions, theta=theta, max_seq_len=self.context_length)
+            
+        result = self.linear(self.norm(x))
+
+        return result
