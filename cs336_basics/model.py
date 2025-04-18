@@ -393,7 +393,24 @@ class multihead_self_attention_qk_norm(torch.nn.Module):
 
         return result
 
+def cross_entropy_z_loss(logits, targets, alpha=1e-2):
+    """
+    Cross entropy loss
+    Args:
+        logits: torch.Tensor
+        targets: torch.Tensor
+    """
+    logits_max, _ = torch.max(logits, dim=-1, keepdim=True)
+    logits_stable = logits - logits_max
+    exp_logits = torch.exp(logits_stable)
+    denom = torch.sum(exp_logits, dim=-1)
+    indices = [torch.arange(logits_stable.size(0)), targets]
+    neg_log_prob = torch.log(denom)-logits_stable[indices]
 
+    log_z = torch.logsumexp(logits, dim=-1)           # (B,)
+    z_loss = (log_z**2).mean()
+    # neg_log_prob = torch.log(denom)-logits_stable[torch.arange(logits_stable.size(0)), targets]
+    return torch.mean(neg_log_prob) + alpha * z_loss
 #############################################################################################################
 
 # ABLATION 1: Remove RMSNorm 
