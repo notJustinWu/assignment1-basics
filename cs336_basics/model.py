@@ -286,6 +286,29 @@ def cross_entropy(logits, targets):
 
 # Leaderboard Attempts
 
+class transformer_block_qk_norm(torch.nn.Module):
+    """
+    Transformer block layer
+    Args:
+        d_model: int
+        num_heads: int
+        d_ff: int
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.norm1 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.norm2 = RMSNorm(d_model=self.d_model, eps=1e-5)
+        self.attn = multihead_self_attention_qk_norm(d_model=self.d_model, num_heads=num_heads)
+        self.ffn = positionwise_feedforward(d_model=self.d_model, d_ff=self.d_ff)
+    def forward(self, x: torch.Tensor, positions=None, theta=None, max_seq_len=None):
+        y = x + self.attn(self.norm1(x), positions=positions, theta=theta, max_seq_len=max_seq_len)
+        z = y + self.ffn(self.norm2(y))
+
+        return z
+    
 class Embedding_weight_tying(torch.nn.Module):
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
         super().__init__()
@@ -308,7 +331,7 @@ class transformer_lm_weight_tying(torch.nn.Module):
         self.num_layers = num_layers
         self.token_embedding = Embedding_weight_tying(num_embeddings=vocab_size, embedding_dim=d_model)
         self.transformer_blocks = torch.nn.ModuleList([
-            transformer_block(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
+            transformer_block_qk_norm(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
         self.norm = RMSNorm(d_model=d_model, eps=1e-5)
 
     def forward(self, in_indices, positions=None, theta=None):
@@ -318,6 +341,55 @@ class transformer_lm_weight_tying(torch.nn.Module):
             x = block(x, positions=positions, theta=theta, max_seq_len=self.context_length)
             
         result = einsum(self.token_embedding.embedding, self.norm(x), "num_embeddings embedding_dim, ... embedding_dim -> ... num_embeddings")
+
+        return result
+
+# Implement QK norm
+class multihead_self_attention_qk_norm(torch.nn.Module):
+    """
+    Multihead self-attention layer
+    Args:
+        d_model: int
+        num_heads: int
+    """
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads 
+        self.dk = d_model // num_heads
+        self.dv = d_model // num_heads
+        self.W_Q = Linear(d_model, num_heads * self.dk).W
+        self.W_K = Linear(d_model, num_heads * self.dk).W
+        self.W_V = Linear(d_model, num_heads * self.dv).W
+        self.W_O = Linear(num_heads * self.dv, d_model).W
+        self.qk_norm = RMSNorm(d_model=d_model, eps=1e-5)
+
+    def forward(self, x: torch.Tensor, positions=None, theta=None, max_seq_len=None):
+
+        seq_len = x.shape[-2]
+
+        # project x to Q, K, V
+        Q = einsum(self.W_Q, x, "d_k d_in, ... sequence_length d_in -> ... sequence_length d_k")
+        K = einsum(self.W_K, x, "d_k d_in, ... sequence_length d_in -> ... sequence_length d_k")
+        V = einsum(self.W_V, x, "d_v d_in, ... sequence_length d_in -> ... sequence_length d_v")
+
+        Q = self.qk_norm(Q)
+        K = self.qk_norm(K)
+
+        Q = rearrange(Q, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+        K = rearrange(K, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+        V = rearrange(V, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+
+        if positions is not None:
+            ROPE = RotaryPositionalEmbedding(theta=theta, d_k=self.dk, max_seq_len=max_seq_len, device=x.device)
+            Q = ROPE(Q, positions)
+            K = ROPE(K, positions)
+
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=Q.device), diagonal=1).bool()
+
+        multi_attn = scaled_dot_product_attention(Q, K, V, mask=~causal_mask)
+        concat_attn = rearrange(multi_attn, "... head seq_len d_v -> ... seq_len (head d_v)")
+        result = einsum(self.W_O, concat_attn, "d_model hdv, ... seq_len hdv -> ... seq_len d_model")
 
         return result
 
