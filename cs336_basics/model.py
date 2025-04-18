@@ -282,12 +282,49 @@ def cross_entropy(logits, targets):
     # neg_log_prob = torch.log(denom)-logits_stable[torch.arange(logits_stable.size(0)), targets]
     return torch.mean(neg_log_prob)
 
-########################################################
-# ABLATIONS ############################################
-########################################################
+#############################################################################################################
 
-# ABLATION 1: Remove RMSNorm ##########################
+# Leaderboard Attempts
 
+class Embedding_weight_tying(torch.nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.embedding = nn.Parameter(torch.empty(
+            self.num_embeddings, self.embedding_dim, device=device, dtype=dtype))
+        # std = 1/sqrt(embedding_dim)
+        nn.init.trunc_normal_(self.embedding, mean = 0.0, std = 0.05, a = -3, b = 3)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.embedding[token_ids]
+
+# Implement weight tying
+class transformer_lm_weight_tying(torch.nn.Module):
+    def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.token_embedding = Embedding_weight_tying(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.transformer_blocks = torch.nn.ModuleList([
+            transformer_block(d_model=d_model, num_heads=num_heads, d_ff=d_ff) for _ in range(self.num_layers)])
+        self.norm = RMSNorm(d_model=d_model, eps=1e-5)
+
+    def forward(self, in_indices, positions=None, theta=None):
+        x = self.token_embedding(in_indices)
+        
+        for block in self.transformer_blocks:
+            x = block(x, positions=positions, theta=theta, max_seq_len=self.context_length)
+            
+        result = einsum(self.token_embedding.embedding, self.norm(x), "num_embeddings embedding_dim, ... embedding_dim -> ... num_embeddings")
+
+        return result
+
+
+#############################################################################################################
+
+# ABLATION 1: Remove RMSNorm 
 class transformer_block_ablation_no_rms_norm(torch.nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int):
         super().__init__()
@@ -323,8 +360,7 @@ class transformer_lm_ablation_no_rms_norm(torch.nn.Module):
 
         return result
 
-# ABLATION 2: Post RMSNorm ##########################
-
+# ABLATION 2: Post RMSNorm 
 class transformer_block_ablation_post_rms_norm (torch.nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int):
         super().__init__()
@@ -363,11 +399,7 @@ class transformer_lm_ablation_post_rms_norm(torch.nn.Module):
 
         return result
 
-# ABLATION 3: No Position Embedding ##########################
-
-# JUST DO THE SAME THING BUT PASS IN NONE FOR POSITIONS AND THETA
-
-# ABLATION 4: Silu Activation Function
+# ABLATION 3: Silu Activation Function
 class positionwise_feedforward_ablation_silu(torch.nn.Module):
     def __init__(self, d_model: int, d_ff: int):
         super().__init__()
