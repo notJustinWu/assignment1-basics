@@ -228,7 +228,7 @@ class TopkRouter(torch.nn.Module):
         raw_logits = self.topklinear(x) # shape: (..., num_experts)
         raw_noise_logits = self.noiselinear(x)
         
-        noise = torch.normal(torch.zeros(raw_noise_logits.shape), std=1)
+        noise = torch.randn_like(raw_noise_logits)
 
         noise_tensor = softplus(raw_noise_logits) * noise
 
