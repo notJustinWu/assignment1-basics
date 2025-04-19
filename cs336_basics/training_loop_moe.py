@@ -43,6 +43,8 @@ def train_lm(train_tokens_path: str,
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir, exist_ok=True)
     wandb.init(project=wandb_project)
+    wandb.define_metric("train_loss", summary="time_min")
+    wandb.define_metric("val_loss", summary="time_min")
     # load datasets using mmap but the dataset is in txt format
     # for now, train and valid are both in cs336_basics/vocab/TinyStoriesV2-GPT4-valid-encoded.txt
     train_tokens = np.load(train_tokens_path)#, mmap_mode='r')
@@ -117,11 +119,13 @@ def train_lm(train_tokens_path: str,
         gradient_clipping(model.parameters(), max_l2_norm=grad_clip)
         optimizer.step()
 
+        elapsed_time = time.time() - start_time
+        elapsed_time_minutes = elapsed_time / 60.0
         wandb.log({
             "train_loss": loss.item(),
             "learning_rate": lr_t,
             "iteration": iteration,
-            "wallclock_time": time.time() - start_time
+            "time_minutes": elapsed_time_minutes
         })
 
         # logging loss
@@ -131,10 +135,12 @@ def train_lm(train_tokens_path: str,
         if (iteration + 1) % validate_every == 0:
             val_loss = evaluate(model, val_tokens, context_length, device, theta=theta)
             print(f"Validation Iteration: {iteration}, Val Loss: {val_loss:.4f}")
+            elapsed_time_minutes = (time.time() - start_time) / 60.0
+
             wandb.log({
                 "val_loss": val_loss,
                 "iteration": iteration + 1,
-                "wallclock_time": time.time() - start_time
+                "time_minutes": elapsed_time_minutes
             })
         # save checkpoint
         if (iteration + 1) % save_every == 0:
